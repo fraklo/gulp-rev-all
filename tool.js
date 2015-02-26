@@ -9,9 +9,11 @@ module.exports = function(options) {
     var options = options || {};
     var self = this;
     var cache = {};
+    var files = [];
     var fs = options.fs || gracefulfs;
     var path = options.path || patho;
     var bases = (options.base && Array.isArray(options.base) && options.base) || options.base && [options.base] || [];
+    var customBase = options.customBase || false;
 
     var amdCommonJsRegex = /(?:define|require)\s*\(\s*((?:['"][^'"]*['"]\s?,\s?)?(?:\[[^\]]*|(?:function))|(?:['"][^'"]*['"]\s?))/g,
         amdCommonJsFilepathRegex = /\"([ a-z0-9_@\-\/\.]{2,})\"|\'([ a-z0-9_@\-\/\.]{2,})\'/ig,
@@ -61,13 +63,26 @@ module.exports = function(options) {
         var hash = cache[cachePath(file.path)].hash;
         var ext = path.extname(file.path);
         var filename;
-
+        var basename;
+        var found = false;
         if (options.transformFilename) {
-            filename = options.transformFilename.call(self, file, hash);
+          filename = options.transformFilename.call(self, file, hash);
         } else {
-            filename = path.basename(file.path, ext) + '.' + hash.substr(0, options.hashLength) + ext;
+          basename = path.basename(file.path, ext);
+          filename = basename + '.' + hash.substr(0, options.hashLength) + ext;
+          for (var i = 0; i < files.length; i++) {
+            if(files[i].base == basename + ext) {
+              found = true;
+              filename = files[i].file;
+            }
+          }
+          if(!found) {
+            files.push({
+              base: basename + ext,
+              file: filename
+            });
+          }
         }
-
         return filename;
     };
 
@@ -81,7 +96,7 @@ module.exports = function(options) {
         // Add back the relative reference so we don't break commonjs style includes
         if (reference.indexOf('./') === 0) {
             newPath = './' + newPath;
-        }         
+        }
 
         if (options.transformPath) {
             newPath = options.transformPath.call(self, newPath, reference, file, isRelative);
@@ -127,6 +142,17 @@ module.exports = function(options) {
             });
         }
 
+        if(customBase) {
+          var customRegex = customBase.replace(/\\/g, "\/") + "[A-Za-z0-9_\/.\-]+";
+          var customBaseRegex = new RegExp(customRegex, 'ig');
+          while ((result = customBaseRegex.exec(regularContent))) {
+              refs.push({
+                  reference: result[0],
+                  isAmdCommonJs: false
+              });
+          }
+        }
+
         while ((result = sourcemapRegex.exec(regularContent))) {
           refs.push({
             reference: result[1],
@@ -165,7 +191,7 @@ module.exports = function(options) {
         if (cache[cachePath(file.path)] && cache[cachePath(file.path)].hash) {
             return cache[cachePath(file.path)].hash;
         }
-                    
+
         // If the hash of the file we're trying to resolve is already in the stack, stop to prevent circular dependency overflow
         var positionInStack = _.indexOf(stack, cache[cachePath(file.path)]);
         if (positionInStack > -1) {
@@ -193,7 +219,7 @@ module.exports = function(options) {
             for (var i = positionInStack+1; i < stack.length; i++) {
                 stack[positionInStack].backpropagate.push(stack[i]);
             }
-            
+
             return '';
         }
 
@@ -225,7 +251,7 @@ module.exports = function(options) {
             gutil.log('gulp-rev-all:', 'Finding references in [', gutil.colors.magenta(getRelativeFilename(file.base, file.path)), ']');
             refs = findRefs(file);
         }
-        
+
         // Create a map of file references and their proper revisioned name
         var contents = String(file.contents);
         var hash = md5(contents);
@@ -244,7 +270,6 @@ module.exports = function(options) {
             if (cacheEntry.rewriteMap[reference]) {
                 continue;
             }
-            
             var pathType;
             if (isAmdCommonJs) {
                 pathType = 'amdCommonJs';
@@ -278,7 +303,13 @@ module.exports = function(options) {
                     isRelative: false
                 });
 
-                if (pathType === 'relative') {
+                if(customBase && reference.indexOf(customBase) > -1) {
+                  referencePaths.push({
+                    base: fileDir.replace(fileDir.substr(fileDir.lastIndexOf('/') + 1), ''),
+                    path: reference_.split('/').splice(-2, 2).join('/'),
+                    isRelative: false
+                  });
+                } else if (pathType === 'relative') {
                     referencePaths.push({
                         base: fileBasePath,
                         path: joinPath(fileDir, reference_),
@@ -297,8 +328,8 @@ module.exports = function(options) {
                 }
 
                 // Continue if this file doesn't exist
-                if (!fs.existsSync(referencePath.path) || fs.lstatSync(referencePath.path).isDirectory()) {
-                    continue;          
+                if ((!fs.existsSync(referencePath.path) || fs.lstatSync(referencePath.path).isDirectory()) && (customBase && reference.indexOf(customBase) < 0)) {
+                    continue;
                 }
 
                 // Don't resolve reference of ignored files
@@ -306,11 +337,20 @@ module.exports = function(options) {
                     continue;
                 }
 
-                var refHash = md5Dependency(new gutil.File({
-                        path: referencePath.path,
-                        contents: fs.readFileSync(referencePath.path),
-                        base: file.base
-                    }), stack);
+                var refHash = '';
+                if(customBase && reference.indexOf(customBase) > -1) {
+                  refHash = md5Dependency(new gutil.File({
+                      path: referencePath.path,
+                      contents: fs.readFileSync(referencePath.base + '/' + referencePath.path.split('/').splice(-2, 2).join('/')),
+                      base: file.base
+                  }), stack);
+                } else {
+                  refHash = md5Dependency(new gutil.File({
+                      path: referencePath.path,
+                      contents: fs.readFileSync(referencePath.path),
+                      base: file.base
+                  }), stack);
+                }
 
                 hash += refHash;
 
@@ -352,7 +392,7 @@ module.exports = function(options) {
         for (var reference in cache[cachePath(file.path)].rewriteMap) {
             var fileReference = cache[cachePath(file.path)].rewriteMap[reference].reference.fileOriginal;
             var isRelative = cache[cachePath(file.path)].rewriteMap[reference].relative;
-            var isAmdCommonJs = cache[cachePath(file.path)].rewriteMap[reference].amdCommonJs;          
+            var isAmdCommonJs = cache[cachePath(file.path)].rewriteMap[reference].amdCommonJs;
             var replaceWith = getReplacement(reference, fileReference, isRelative, isAmdCommonJs);
             var contents;
 
@@ -381,7 +421,7 @@ module.exports = function(options) {
                     var change = partials[original];
                     contents = contents.replace(original, change);
                 }
-                
+
             } else {
                 contents = String(file.contents);
                 contents = contents.replace(new RegExp(reference, 'g'), replaceWith);
@@ -398,7 +438,7 @@ module.exports = function(options) {
         } else {
             gutil.log('gulp-rev-all:', 'Not renaming [', gutil.colors.red(getRelativeFilename(file.base, file.path)), '] due to filter rules.');
         }
-        
+
         return file;
     };
 
